@@ -66,17 +66,25 @@ g           = 9.81    # m/s²
 peak_G      = 31.7    # G  (from simulate.py)
 F_axial     = m_launch * peak_G * g  # axial load during burn, N
 
-# Max dynamic pressure: Mach 1.1 at ~5 km altitude (standard atmosphere)
-#   ρ = 0.736 kg/m³,  a = 320 m/s  →  V = 352 m/s
-rho_5km = 0.736   # kg/m³
-a_5km   = 320.0   # m/s
-V_maxQ  = 1.1 * a_5km
-q_maxQ  = 0.5 * rho_5km * V_maxQ**2  # Pa
-
-# Max speed: Mach 5.47 at ~17 km (a ≈ 295 m/s,  ρ ≈ 0.104 kg/m³)
-a_17km   = 295.0
-rho_17km = 0.104
-V_maxspd = 5.47 * a_17km
+# Max dynamic pressure and peak speed both occur at BURNOUT (~9.5 km, t≈10 s).
+#
+# The 1D ascent model (fin_flutter_naca.py) gives:
+#   peak speed  ≈ 1861 m/s  Mach 6.17  at 9.5 km  (1D, overestimates ~15%)
+# RocketPy 6DOF (simulate.py):
+#   peak speed  = 1614 m/s  Mach 5.47  (used here — more accurate)
+#   max-Q altitude estimated at ~9–10 km; ρ ≈ 0.41 kg/m³ at 9.5 km ISA
+#
+# Previous version incorrectly assumed max-Q at Mach 1.1 / 5 km (45.6 kPa).
+# The correct worst-case condition for fin loading is at burnout, not
+# at the transonic pinch point. The higher speed is partially offset by
+# the lower piston-theory CLα at supersonic Mach numbers.
+#
+# Burnout conditions (ISA, 9.5 km):
+#   T = 222.1 K,  a = 298.8 m/s,  ρ = 0.413 kg/m³
+rho_burnout = 0.413   # kg/m³ at 9.5 km ISA
+V_maxspd    = 1614.0  # m/s (6DOF, from simulate.py)
+M_maxspd    = V_maxspd / 298.8   # ≈ 5.40
+q_maxQ      = 0.5 * rho_burnout * V_maxspd**2  # Pa  (~538 kPa)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # CHECK 1: Euler Column Buckling
@@ -102,12 +110,20 @@ SF_shell    = sigma_cr_sh / sigma_appl
 # ──────────────────────────────────────────────────────────────────────────────
 # CHECK 3: Fin Root Bending Stress
 # ──────────────────────────────────────────────────────────────────────────────
-# Normal force per fin (Barrowman slender-wing lift, 5° AoA, max-Q)
-# CN_alpha (per fin, per radian) ≈ 2π / (1 + 2/AR_exp)  — corrected for AR
-# This is the Helmbold formula for low-AR wings.
+# Normal force per fin at the worst-case burnout condition.
+#
+# CLα model:  piston theory + Helmbold finite-span correction
+#   CLα_2D  = 4/M                         (piston theory, M > 1.2)
+#   CLα_fin = CLα_2D / (1 + 2/AR_exp)     (Helmbold low-AR correction)
+#
+# Note: at Mach 5.4 the piston-theory CLα (0.74/3.6 = 0.206) is much lower
+# than the subsonic Helmbold value (2π/3.6 = 1.75) used in the prior version.
+# The higher q at burnout and the lower CLα partially cancel; net N_fin is
+# ~33% higher than the old Mach-1.1 estimate but still yields SF >> 1.
 AoA_deg    = 5.0
 AoA_rad    = math.radians(AoA_deg)
-CN_alpha_fin = 2 * math.pi / (1 + 2 / AR_exp)   # /rad
+CLa_2d     = 4.0 / M_maxspd                   # piston theory, /rad
+CN_alpha_fin = CLa_2d / (1 + 2 / AR_exp)      # Helmbold AR correction, /rad
 N_fin      = CN_alpha_fin * q_maxQ * S_fin * AoA_rad  # normal force, N
 
 # Root bending moment (assume triangular spanwise load → resultant at b/3 from root)
@@ -137,9 +153,12 @@ omega_n = 2 * math.pi * f_nat
 # Theodorsen reduced frequency:  k = ω × c_avg / (2V)
 # Flutter onset is empirically associated with k dropping below ~0.2;
 # k < 0.08 is considered high flutter risk.
-# These thresholds are from classical thin-airfoil flutter theory.
-k_maxQ   = omega_n * c_avg / (2 * V_maxQ)
-k_maxspd = omega_n * c_avg / (2 * V_maxspd)
+# Evaluated at burnout (max speed) — same condition as fin root stress.
+#
+# Note: the Theodorsen criterion assumes subsonic incompressible flow.
+# For the supersonic case see fin_flutter_naca.py (piston-theory divergence),
+# which gives a more rigorous result.
+k_burnout = omega_n * c_avg / (2 * V_maxspd)
 
 def flutter_rating(k):
     if k >= 0.20:  return "SAFE     ✓"
@@ -159,8 +178,8 @@ print("=" * 68)
 print("  Apex-1 — Structural Analysis")
 print("=" * 68)
 print(f"\n  Axial load (burn, {peak_G:.0f} G):  {F_axial/1e3:7.2f} kN")
-print(f"  Max-Q (Mach 1.1, 5 km):    {q_maxQ/1e3:7.2f} kPa  "
-      f"({0.5*rho_5km*V_maxQ**2/101325*100:.1f}% of 1 atm)")
+print(f"  Max-Q at burnout (M{M_maxspd:.1f}, 9.5 km):  {q_maxQ/1e3:7.1f} kPa  "
+      f"({q_maxQ/101325*100:.0f}% of 1 atm)")
 
 print("\n  ── Airframe (CF tube 127 mm OD × 2 mm wall) ──────────────────")
 print(sf_line("Euler column buckling", SF_euler))
@@ -169,27 +188,28 @@ print(sf_line("Local shell buckling (NASA SP-8007, γ=0.40)", SF_shell))
 print(f"    σ_cr = {sigma_cr_sh/1e6:.0f} MPa   σ_applied = {sigma_appl/1e6:.2f} MPa")
 
 print("\n  ── Fins (FG 4 mm thick, 200 mm span, 360/160 mm root/tip) ────")
-print(sf_line(f"Fin root bending stress ({AoA_deg:.0f}° AoA, max-Q)", SF_fin_root))
+print(f"  Load case: burnout, Mach {M_maxspd:.1f}, {AoA_deg:.0f}° AoA  "
+      f"(CLα = {CN_alpha_fin:.3f} /rad, piston theory + AR correction)")
+print(sf_line(f"Fin root bending stress ({AoA_deg:.0f}° AoA, burnout)", SF_fin_root))
 print(f"    N_fin = {N_fin:.0f} N   M_root = {M_root:.1f} N·m   "
       f"σ_root = {sigma_root/1e6:.1f} MPa   (limit {sigma_ult_fg/1e6:.0f} MPa)")
 
-print("\n  ── Fin flutter (reduced frequency, Theodorsen criterion) ──────")
+print("\n  ── Fin flutter (Theodorsen reduced-frequency proxy) ───────────")
 print(f"  Fin natural bending frequency:       f_n = {f_nat:.1f} Hz")
-print(f"  Reduced freq at max-Q  (M1.1, 5km):   k = {k_maxQ:.3f}  "
-      f"→  {flutter_rating(k_maxQ)}")
-print(f"  Reduced freq at max-V  (M5.5, 17km):  k = {k_maxspd:.3f}  "
-      f"→  {flutter_rating(k_maxspd)}")
+print(f"  Reduced freq at burnout (M{M_maxspd:.1f}):     k = {k_burnout:.3f}  "
+      f"→  {flutter_rating(k_burnout)}")
 print()
-print("  Note: at Mach 5.5 / 17 km, air density is 8.5% of sea level.")
-print("  Low density partially offsets the low reduced frequency,")
-print("  but fin flutter at peak speed warrants FEA / AeroFinSim verification.")
+print("  Note: Theodorsen assumes subsonic incompressible flow — conservative")
+print("  for supersonic flight. See fin_flutter_naca.py for the full piston-")
+print("  theory torsional divergence analysis (NACA TN 4197 approach).")
+print("  Divergence analysis shows SF < 1.5; fin thickness increase recommended.")
 
 print("\n  ── Summary ────────────────────────────────────────────────────")
-print("  Column buckling:   SAFE (large margin from motor thrust to critical load)")
+print("  Column buckling:   SAFE (large margin, motor thrust << critical load)")
 print("  Shell buckling:    SAFE (thin-wall CF handles applied compressive stress)")
-print("  Fin root stress:   SAFE (FG strength >> aerodynamic bending load)")
-print("  Fin flutter:       MARGINAL at max-Q; needs verification at max speed")
+print("  Fin root stress:   SAFE (piston-theory + AR correction, burnout load)")
+print("  Fin flutter:       AT RISK — see fin_flutter_naca.py for full analysis")
 print()
-print("  Highest priority action: validate fin flutter with AeroFinSim")
-print("  or pycalculix FEA before committing to this design.")
+print("  Highest priority action: increase fin thickness to ≥ 7 mm per")
+print("  fin_flutter_naca.py (piston-theory divergence, SF ≥ 1.5).")
 print("=" * 68)
